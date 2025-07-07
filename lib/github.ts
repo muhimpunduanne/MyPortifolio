@@ -1,20 +1,124 @@
-// import type { GitHubData, Repository, Commit, ContributionDay } from "@/types/github"
-
+// githubFetcher.ts
 import { GitHubData, Repository, Commit, ContributionDay } from "@/types/github"
 
-// Function to fetch GitHub data from the real GitHub API
-export async function fetchGitHubData(username: string): Promise<GitHubData> {
-  try {
-    // Fetch repositories
-    const reposResponse = await fetch(`https://api.github.com/users/${username}/repos?sort=updated&per_page=10`)
+const GITHUB_GRAPHQL_API = 'https://api.github.com/graphql'
 
-    if (!reposResponse.ok) {
-      throw new Error(`GitHub API error: ${reposResponse.status}`)
+const CONTRIBUTIONS_QUERY = `
+  query($userName: String!) {
+    user(login: $userName) {
+      contributionsCollection {
+        contributionCalendar {
+          totalContributions
+          weeks {
+            contributionDays {
+              contributionCount
+              date
+            }
+          }
+        }
+      }
+      repositories(first: 10, orderBy: {field: UPDATED_AT, direction: DESC}) {
+        nodes {
+          id
+          name
+          description
+          url
+          stargazerCount
+          forkCount
+          repositoryTopics(first: 10) {
+            nodes {
+              topic {
+                name
+              }
+            }
+          }
+          defaultBranchRef {
+            name
+          }
+          updatedAt
+        }
+      }
     }
+  }
+`
+
+// ----------- Real GitHub Data Fetcher (GraphQL) -----------
+export async function fetchRealGitHubData(username: string): Promise<GitHubData> {
+  const token = process.env.GITHUB_TOKEN
+
+  if (!token) {
+    console.warn('❌ No GitHub token provided in environment, falling back to REST API')
+    return await fetchGitHubDataREST(username)
+  }
+
+  try {
+    const response = await fetch(GITHUB_GRAPHQL_API, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        query: CONTRIBUTIONS_QUERY,
+        variables: { userName: username },
+      }),
+    })
+
+    if (!response.ok) throw new Error(`GitHub GraphQL API error: ${response.status}`)
+
+    const json = await response.json()
+
+    if (json.errors) throw new Error(`GraphQL errors: ${JSON.stringify(json.errors)}`)
+
+    const user = json.data.user
+
+    if (!user) throw new Error(`User ${username} not found`)
+
+    const repositories: Repository[] = user.repositories.nodes.map((repo: any) => ({
+      id: repo.id,
+      name: repo.name,
+      description: repo.description,
+      url: repo.url,
+      stars: repo.stargazerCount,
+      forks: repo.forkCount,
+      topics: repo.repositoryTopics.nodes.map((topic: any) => topic.topic.name),
+      defaultBranch: repo.defaultBranchRef?.name || 'main',
+      updatedAt: repo.updatedAt,
+    }))
+
+    const contributions: ContributionDay[] = []
+
+    user.contributionsCollection.contributionCalendar.weeks.forEach((week: any) => {
+      week.contributionDays.forEach((day: any) => {
+        contributions.push({
+          date: day.date,
+          count: day.contributionCount,
+        })
+      })
+    })
+
+    const commits = await fetchRecentCommits(username)
+
+    return {
+      username,
+      repositories,
+      commits,
+      contributions,
+    }
+  } catch (error) {
+    console.error('❌ Error fetching GitHub data via GraphQL:', error)
+    return await fetchGitHubDataREST(username)
+  }
+}
+
+// ----------- REST API Fallback -----------
+async function fetchGitHubDataREST(username: string): Promise<GitHubData> {
+  try {
+    const reposResponse = await fetch(`https://api.github.com/users/${username}/repos?sort=updated&per_page=10`)
+    if (!reposResponse.ok) throw new Error(`GitHub REST API error: ${reposResponse.status}`)
 
     const reposData = await reposResponse.json()
 
-    // Transform repositories data
     const repositories: Repository[] = reposData.map((repo: any) => ({
       id: repo.id.toString(),
       name: repo.name,
@@ -27,26 +131,47 @@ export async function fetchGitHubData(username: string): Promise<GitHubData> {
       updatedAt: repo.updated_at,
     }))
 
-    // Fetch recent commits (this is a simplified approach)
-    // In a real app, you might need to fetch commits for each repository
-    const commitsResponse = await fetch(`https://api.github.com/users/${username}/events?per_page=10`)
+    const commits = await fetchRecentCommits(username)
 
-    if (!commitsResponse.ok) {
-      throw new Error(`GitHub API error: ${commitsResponse.status}`)
+    return {
+      username,
+      repositories,
+      commits,
+      contributions: [],
+    }
+  } catch (error) {
+    console.error('❌ Error fetching GitHub data with REST API:', error)
+    throw error
+  }
+}
+
+// ----------- Recent Commits -----------
+async function fetchRecentCommits(username: string): Promise<Commit[]> {
+  try {
+    const token = process.env.GITHUB_TOKEN
+    const headers: HeadersInit = {
+      'Accept': 'application/vnd.github.v3+json',
     }
 
-    const eventsData = await commitsResponse.json()
+    if (token) headers['Authorization'] = `Bearer ${token}`
 
-    // Filter push events and extract commits
+    const res = await fetch(`https://api.github.com/users/${username}/events?per_page=30`, {
+      headers,
+    })
+
+    if (!res.ok) throw new Error(`GitHub commits fetch failed: ${res.status}`)
+
+    const events = await res.json()
+
     const commits: Commit[] = []
 
-    eventsData.forEach((event: any) => {
-      if (event.type === "PushEvent") {
+    events.forEach((event: any) => {
+      if (event.type === 'PushEvent') {
         event.payload.commits.forEach((commit: any) => {
           commits.push({
             id: commit.sha,
             message: commit.message,
-            repository: event.repo.name.split("/")[1],
+            repository: event.repo.name.split('/')[1],
             url: `https://github.com/${event.repo.name}/commit/${commit.sha}`,
             date: event.created_at,
           })
@@ -54,167 +179,38 @@ export async function fetchGitHubData(username: string): Promise<GitHubData> {
       }
     })
 
-    // Fetch contribution data (this requires a GraphQL query to GitHub's API)
-    // For demo purposes, we'll generate mock contribution data
-    const contributionData = generateMockContributionData()
-
-    return {
-      username,
-      repositories,
-      commits,
-      contributions: contributionData,
-    }
+    return commits.slice(0, 10)
   } catch (error) {
-    console.error("Error fetching GitHub data:", error)
-
-    // Fallback to mock data if the API fails
-    return generateMockGitHubData(username)
+    console.error('❌ Error fetching recent commits:', error)
+    return []
   }
 }
 
-// Generate mock GitHub data for demo purposes
-function generateMockGitHubData(username: string): GitHubData {
-  const repositories: Repository[] = [
-    {
-      id: "repo1",
-      name: "portfolio-website",
-      description: "My personal portfolio website built with Next.js and Three.js",
-      url: `https://github.com/${username}/portfolio-website`,
-      stars: 24,
-      forks: 5,
-      topics: ["next-js", "three-js", "portfolio", "typescript"],
-      defaultBranch: "main",
-      updatedAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), // 2 days ago
-    },
-    {
-      id: "repo2",
-      name: "react-3d-viewer",
-      description: "A React component for viewing 3D models with Three.js",
-      url: `https://github.com/${username}/react-3d-viewer`,
-      stars: 156,
-      forks: 32,
-      topics: ["react", "three-js", "3d", "component", "npm-package"],
-      defaultBranch: "main",
-      updatedAt: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days ago
-    },
-    {
-      id: "repo3",
-      name: "node-api-starter",
-      description: "A starter template for Node.js APIs with Express and TypeScript",
-      url: `https://github.com/${username}/node-api-starter`,
-      stars: 87,
-      forks: 15,
-      topics: ["node-js", "express", "typescript", "api", "starter-template"],
-      defaultBranch: "main",
-      updatedAt: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(), // 14 days ago
-    },
-    {
-      id: "repo4",
-      name: "e-commerce-platform",
-      description: "A full-stack e-commerce platform with React, Node.js, and MongoDB",
-      url: `https://github.com/${username}/e-commerce-platform`,
-      stars: 42,
-      forks: 8,
-      topics: ["e-commerce", "react", "node-js", "mongodb", "full-stack"],
-      defaultBranch: "main",
-      updatedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(), // 30 days ago
-    },
-  ]
+// ----------- Caching Layer -----------
+let dataCache: { [key: string]: { data: GitHubData; timestamp: number } } = {}
+const CACHE_DURATION = 10 * 60 * 1000 // 10 min
 
-  const commits: Commit[] = [
-    {
-      id: "commit1",
-      message: "Fix responsive layout issues on mobile devices",
-      repository: "portfolio-website",
-      url: `https://github.com/${username}/portfolio-website/commit/abc123`,
-      date: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(), // 1 day ago
-    },
-    {
-      id: "commit2",
-      message: "Add dark mode support",
-      repository: "portfolio-website",
-      url: `https://github.com/${username}/portfolio-website/commit/def456`,
-      date: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), // 2 days ago
-    },
-    {
-      id: "commit3",
-      message: "Implement GLTF model loading with progress indicator",
-      repository: "react-3d-viewer",
-      url: `https://github.com/${username}/react-3d-viewer/commit/ghi789`,
-      date: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(), // 3 days ago
-    },
-    {
-      id: "commit4",
-      message: "Update dependencies and fix security vulnerabilities",
-      repository: "node-api-starter",
-      url: `https://github.com/${username}/node-api-starter/commit/jkl012`,
-      date: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(), // 5 days ago
-    },
-    {
-      id: "commit5",
-      message: "Add unit tests for authentication middleware",
-      repository: "node-api-starter",
-      url: `https://github.com/${username}/node-api-starter/commit/mno345`,
-      date: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString(), // 6 days ago
-    },
-    {
-      id: "commit6",
-      message: "Implement shopping cart functionality with local storage persistence",
-      repository: "e-commerce-platform",
-      url: `https://github.com/${username}/e-commerce-platform/commit/pqr678`,
-      date: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(), // 8 days ago
-    },
-  ]
+export async function fetchGitHubData(username: string): Promise<GitHubData> {
+  const cacheKey = username
+  const now = Date.now()
 
-  return {
-    username,
-    repositories,
-    commits,
-    contributions: generateMockContributionData(),
+  if (dataCache[cacheKey] && now - dataCache[cacheKey].timestamp < CACHE_DURATION) {
+    return dataCache[cacheKey].data
   }
+
+  const data = await fetchRealGitHubData(username)
+
+  dataCache[cacheKey] = { data, timestamp: now }
+
+  return data
 }
 
-// Generate mock contribution data for the GitHub activity graph
-function generateMockContributionData(): ContributionDay[] {
-  const contributions: ContributionDay[] = []
-  const today = new Date()
-
-  // Generate data for the last 365 days
-  for (let i = 364; i >= 0; i--) {
-    const date = new Date(today)
-    date.setDate(date.getDate() - i)
-
-    // Generate a random contribution count with higher probability on weekdays
-    // and occasional streaks of activity
-    let count = 0
-    const dayOfWeek = date.getDay()
-    const isWeekend = dayOfWeek === 0 || dayOfWeek === 6
-
-    // Create a pattern with some streaks and gaps
-    if (i % 7 === 0) {
-      // Create a streak every 7 days
-      count = Math.floor(Math.random() * 12) + 1
-    } else if (i % 23 === 0) {
-      // Create a high activity day occasionally
-      count = Math.floor(Math.random() * 20) + 5
-    } else if (isWeekend) {
-      // Less activity on weekends
-      count = Math.random() > 0.7 ? Math.floor(Math.random() * 3) : 0
-    } else {
-      // Normal weekday
-      count = Math.random() > 0.3 ? Math.floor(Math.random() * 8) : 0
-    }
-
-    // Add some recent high activity
-    if (i < 14) {
-      count = Math.max(count, Math.floor(Math.random() * 10))
-    }
-
-    contributions.push({
-      date: date.toISOString().split("T")[0],
-      count,
+export function clearGitHubCache(username?: string): void {
+  if (username) {
+    Object.keys(dataCache).forEach(key => {
+      if (key.startsWith(username)) delete dataCache[key]
     })
+  } else {
+    dataCache = {}
   }
-
-  return contributions
 }
