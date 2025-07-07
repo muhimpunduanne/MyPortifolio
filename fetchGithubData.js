@@ -1,6 +1,8 @@
+require("dotenv").config();
 const openSource = {
-  githubConvertedToken: "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", // Replace with your actual token
+  githubConvertedToken: "process.env.GITHUB_TOKEN", // Replace with your actual token
   githubUserName: "Derrick-MUGISHA", // Corrected username, no trailing dot
+  
 };
 
 const fetch = require("node-fetch");
