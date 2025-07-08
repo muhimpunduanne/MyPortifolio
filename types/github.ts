@@ -1,7 +1,8 @@
+// types/github.ts
 export interface Repository {
   id: string
   name: string
-  description: string | null
+  description: string
   url: string
   stars: number
   forks: number
