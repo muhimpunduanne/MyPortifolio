@@ -2,6 +2,44 @@
 import { GitHubData, Repository, Commit, ContributionDay } from "@/types/github"
 
 const GITHUB_GRAPHQL_API = 'https://api.github.com/graphql'
+const GITHUB_USERNAME = "Derrick-MUGISHA" // Your actual username
+
+// ----------- Fetch from your API route -----------
+export async function fetchContributionsFromAPI(): Promise<ContributionDay[]> {
+  try {
+    const response = await fetch('/api/github', {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (!response.ok) {
+      throw new Error(`API error: ${response.status}`)
+    }
+
+    const data = await response.json()
+    
+    // Transform the API response to match your ContributionDay format
+    const contributions: ContributionDay[] = []
+    
+    if (data.contributionCalendar?.weeks) {
+      data.contributionCalendar.weeks.forEach((week: any) => {
+        week.contributionDays.forEach((day: any) => {
+          contributions.push({
+            date: day.date,
+            count: day.contributionCount,
+          })
+        })
+      })
+    }
+
+    return contributions
+  } catch (error) {
+    console.error('❌ Error fetching contributions from API:', error)
+    return []
+  }
+}
 
 const CONTRIBUTIONS_QUERY = `
   query($userName: String!) {
@@ -43,7 +81,7 @@ const CONTRIBUTIONS_QUERY = `
 `
 
 // ----------- Real GitHub Data Fetcher (GraphQL) -----------
-export async function fetchRealGitHubData(username: string): Promise<GitHubData> {
+export async function fetchRealGitHubData(username: string = GITHUB_USERNAME): Promise<GitHubData> {
   const token = process.env.GITHUB_TOKEN
 
   if (!token) {
@@ -133,11 +171,14 @@ async function fetchGitHubDataREST(username: string): Promise<GitHubData> {
 
     const commits = await fetchRecentCommits(username)
 
+    // Try to fetch contributions from your API route
+    const contributions = await fetchContributionsFromAPI()
+
     return {
       username,
       repositories,
       commits,
-      contributions: [],
+      contributions,
     }
   } catch (error) {
     console.error('❌ Error fetching GitHub data with REST API:', error)
@@ -190,7 +231,7 @@ async function fetchRecentCommits(username: string): Promise<Commit[]> {
 let dataCache: { [key: string]: { data: GitHubData; timestamp: number } } = {}
 const CACHE_DURATION = 10 * 60 * 1000 // 10 min
 
-export async function fetchGitHubData(username: string): Promise<GitHubData> {
+export async function fetchGitHubData(username: string = GITHUB_USERNAME): Promise<GitHubData> {
   const cacheKey = username
   const now = Date.now()
 
